@@ -1,114 +1,98 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Backend - Gestion de Contratistas
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+API REST en NestJS 12 + Prisma 7 + PostgreSQL para gestionar contratistas y el control de su documentacion: los usuarios del contratista suben documentos y los aprobadores internos los aprueban o rechazan. El estado de cumplimiento del contratista se recalcula automaticamente.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Requisitos
 
-## Description
+- Node.js 22+
+- Docker (para PostgreSQL) o una instancia de PostgreSQL 16
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+## Puesta en marcha
 
 ```bash
-$ npm install
+cp .env.example .env        # ajusta los valores si es necesario
+npm install                 # tambien genera el cliente de Prisma
+npm run db:up               # levanta PostgreSQL en el puerto 5433
+npm run db:migrate          # aplica las migraciones
+npm run db:seed             # usuarios, tipos de documento y un contratista de ejemplo
+npm run start:dev           # API en http://localhost:3001/api
 ```
 
-## Compile and run the project
+### Usuarios del seed
+
+Todos usan la contrasena `Admin123*`.
+
+| Email | Rol |
+| --- | --- |
+| admin@contractors.local | Administrador |
+| aprobador@contractors.local | Aprobador |
+| contratista@contractors.local | Usuario del contratista "Construcciones Andinas S.A.S." |
+
+## Variables de entorno
+
+| Variable | Descripcion |
+| --- | --- |
+| `DATABASE_URL` | Cadena de conexion de PostgreSQL |
+| `JWT_SECRET` | Secreto para firmar los tokens |
+| `JWT_EXPIRES_IN` | Duracion del token (por defecto `8h`) |
+| `PORT` | Puerto de la API (por defecto `3001`) |
+| `UPLOAD_DIR` | Carpeta donde se guardan los archivos (por defecto `uploads`) |
+| `MAX_UPLOAD_MB` | Tamano maximo por archivo (por defecto `10`) |
+| `CORS_ORIGIN` | Origenes permitidos, separados por coma |
+
+## Roles
+
+- `ADMIN`: gestiona contratistas, usuarios y tipos de documento; puede subir y revisar.
+- `APPROVER`: ve todos los contratistas y la cola de revision; aprueba o rechaza (el rechazo exige comentario).
+- `CONTRACTOR_USER`: ligado a un contratista; solo ve y sube documentos de su empresa.
+
+## Flujo de documentos
+
+`PENDING` -> `SUBMITTED` (subida) -> `APPROVED` o `REJECTED` (revision). Un rechazado o vencido se vuelve a subir y regresa a `SUBMITTED`. Un job diario (1:00 a.m. y al arrancar) marca como `EXPIRED` los aprobados cuya fecha de vencimiento ya paso.
+
+El contratista queda `COMPLIANT` cuando todos los tipos obligatorios estan aprobados y vigentes, `EXPIRED` si alguno vencio, e `INCOMPLETE` en otro caso.
+
+## Endpoints principales
+
+Todas las rutas usan el prefijo `/api` y requieren `Authorization: Bearer <token>`, salvo login y health.
+
+| Metodo | Ruta | Roles |
+| --- | --- | --- |
+| POST | `/auth/login` | Publico |
+| GET | `/auth/me` | Autenticado |
+| GET | `/dashboard/stats` | Autenticado |
+| GET, POST | `/contractors` | GET: autenticado (contratista ve solo el suyo). POST: ADMIN |
+| GET, PATCH | `/contractors/:id` | GET: con alcance. PATCH: ADMIN |
+| GET | `/contractors/:id/documents` | Con alcance |
+| POST | `/contractors/:id/documents/:typeId` | CONTRACTOR_USER, ADMIN (multipart: `file`, `expiresAt`) |
+| GET | `/documents/:id/file` | Con alcance (acepta `?token=` para abrir en pestana nueva) |
+| GET | `/documents/:id/reviews` | Con alcance |
+| POST | `/documents/:id/review` | APPROVER, ADMIN (`{ action, comment }`) |
+| GET | `/reviews/pending`, `/reviews/pending/count` | APPROVER, ADMIN |
+| GET, POST, PATCH | `/document-types` | GET: autenticado. Escritura: ADMIN |
+| GET, POST, PATCH | `/users` | ADMIN |
+
+## Estructura
+
+```
+src/
+  auth/            login JWT, guards globales, @Public, @Roles, alcance por contratista
+  compliance/      calculo de cumplimiento, job de vencimientos, estadisticas
+  contractors/
+  document-types/
+  documents/       checklist, subida y descarga de archivos
+  reviews/         cola de revision y aprobacion/rechazo
+  storage/         almacenamiento local de archivos (reemplazable por S3)
+  users/
+  prisma/          PrismaService
+prisma/
+  schema.prisma
+  seed.ts
+```
+
+## Tests
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm run test       # unitarios
+npm run test:e2e   # flujo completo contra la base de datos (requiere migraciones y seed)
 ```
-
-## Run tests
-
-```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
-```
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Observability
-
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
-
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
-
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).

@@ -1,0 +1,119 @@
+generator client {
+  provider               = "prisma-client"
+  output                 = "../src/generated/prisma"
+  moduleFormat           = "esm"
+  importFileExtension    = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  APPROVER
+  CONTRACTOR_USER
+}
+
+enum ContractorStatus {
+  INCOMPLETE
+  COMPLIANT
+  EXPIRED
+}
+
+enum DocumentStatus {
+  PENDING
+  SUBMITTED
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum ReviewAction {
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id           String      @id @default(uuid())
+  email        String      @unique
+  passwordHash String
+  name         String
+  role         Role
+  isActive     Boolean     @default(true)
+  contractorId String?
+  contractor   Contractor? @relation(fields: [contractorId], references: [id], onDelete: SetNull)
+  uploads      Document[]  @relation("UploadedBy")
+  reviews      DocumentReview[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([contractorId])
+}
+
+model Contractor {
+  id          String           @id @default(uuid())
+  name        String
+  taxId       String           @unique
+  email       String?
+  phone       String?
+  address     String?
+  contactName String?
+  status      ContractorStatus @default(INCOMPLETE)
+  isActive    Boolean          @default(true)
+  users       User[]
+  documents   Document[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([status])
+}
+
+model DocumentType {
+  id          String     @id @default(uuid())
+  name        String     @unique
+  description String?
+  required    Boolean    @default(true)
+  expires     Boolean    @default(false)
+  isActive    Boolean    @default(true)
+  documents   Document[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model Document {
+  id           String           @id @default(uuid())
+  contractorId String
+  contractor   Contractor       @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  typeId       String
+  type         DocumentType     @relation(fields: [typeId], references: [id], onDelete: Cascade)
+  status       DocumentStatus   @default(PENDING)
+  filePath     String?
+  fileName     String?
+  mimeType     String?
+  size         Int?
+  expiresAt    DateTime?
+  submittedAt  DateTime?
+  uploadedById String?
+  uploadedBy   User?            @relation("UploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  reviews      DocumentReview[]
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  @@unique([contractorId, typeId])
+  @@index([status])
+}
+
+model DocumentReview {
+  id         String       @id @default(uuid())
+  documentId String
+  document   Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  reviewerId String
+  reviewer   User         @relation(fields: [reviewerId], references: [id])
+  action     ReviewAction
+  comment    String?
+  fileName   String?
+  createdAt  DateTime     @default(now())
+
+  @@index([documentId])
+}
