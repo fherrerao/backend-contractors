@@ -11,6 +11,7 @@ describe('Flujo de documentacion (e2e)', () => {
   const suffix = Date.now().toString();
   const password = 'Secreta123*';
   let contractorId: string;
+  let projectId: string;
   let contractorUserId: string;
 
   const login = async (email: string, pass = 'Admin123*') => {
@@ -61,6 +62,28 @@ describe('Flujo de documentacion (e2e)', () => {
     contractorId = contractor.body.id;
     expect(contractor.body.status).toBe('INCOMPLETE');
 
+    const project = await request(server)
+      .post(`/api/contractors/${contractorId}/projects`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: `Proyecto E2E ${suffix}`, code: `E2E-${suffix}` })
+      .expect(201);
+    projectId = project.body.id;
+
+    const createdDocs = [];
+    for (const [i, name] of ['RUT', 'Poliza'].entries()) {
+      const doc = await request(server)
+        .post(`/api/projects/${projectId}/documents`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          name,
+          required: true,
+          expires: i === 1,
+          description: `Doc e2e ${name}`,
+        })
+        .expect(201);
+      createdDocs.push(doc.body);
+    }
+
     const user = await request(server)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -76,17 +99,17 @@ describe('Flujo de documentacion (e2e)', () => {
     const contractorToken = await login(`e2e-${suffix}@contractors.local`, password);
 
     const docs = await request(server)
-      .get(`/api/contractors/${contractorId}/documents`)
+      .get(`/api/projects/${projectId}/documents`)
       .set('Authorization', `Bearer ${contractorToken}`)
       .expect(200);
-    const required = docs.body.filter((d: { type: { required: boolean } }) => d.type.required);
-    expect(required.length).toBeGreaterThan(0);
+    const required = docs.body.filter((d: { required: boolean }) => d.required);
+    expect(required.length).toBe(2);
 
-    const otherContractor = await prisma.contractor.findFirstOrThrow({
-      where: { id: { not: contractorId } },
+    const otherProject = await prisma.project.findFirstOrThrow({
+      where: { contractorId: { not: contractorId } },
     });
     await request(server)
-      .get(`/api/contractors/${otherContractor.id}/documents`)
+      .get(`/api/projects/${otherProject.id}/documents`)
       .set('Authorization', `Bearer ${contractorToken}`)
       .expect(403);
 
@@ -95,9 +118,9 @@ describe('Flujo de documentacion (e2e)', () => {
       .set('Authorization', `Bearer ${contractorToken}`)
       .expect(403);
 
-    const upload = (typeId: string, expires: boolean) => {
+    const upload = (documentId: string, expires: boolean) => {
       const req = request(server)
-        .post(`/api/contractors/${contractorId}/documents/${typeId}`)
+        .post(`/api/projects/${projectId}/documents/${documentId}/file`)
         .set('Authorization', `Bearer ${contractorToken}`)
         .attach('file', Buffer.from('%PDF-1.4 e2e'), {
           filename: 'documento.pdf',
@@ -115,12 +138,12 @@ describe('Flujo de documentacion (e2e)', () => {
 
     const first = required[0];
     await request(server)
-      .post(`/api/contractors/${contractorId}/documents/${first.typeId}`)
+      .post(`/api/projects/${projectId}/documents/${first.id}/file`)
       .set('Authorization', `Bearer ${contractorToken}`)
       .attach('file', Buffer.from('texto'), { filename: 'nota.txt', contentType: 'text/plain' })
       .expect(400);
 
-    const submitted = await upload(first.typeId, first.type.expires).expect(201);
+    const submitted = await upload(first.id, first.expires).expect(201);
     expect(submitted.body.status).toBe('SUBMITTED');
 
     await review(submitted.body.id, 'REJECTED').expect(400);
@@ -129,7 +152,7 @@ describe('Flujo de documentacion (e2e)', () => {
     await review(submitted.body.id, 'APPROVED').expect(400);
 
     for (const doc of required) {
-      const res = await upload(doc.typeId, doc.type.expires).expect(201);
+      const res = await upload(doc.id, doc.expires).expect(201);
       await review(res.body.id, 'APPROVED').expect(201);
     }
 

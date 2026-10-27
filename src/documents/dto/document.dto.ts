@@ -1,7 +1,7 @@
 import { PartialType } from '@nestjs/mapped-types';
 import { IsBoolean, IsOptional, IsString, MinLength } from 'class-validator';
 
-export class CreateDocumentTypeDto {
+export class CreateDocumentDto {
   @IsString()
   @MinLength(2)
   name: string;
@@ -19,8 +19,4 @@ export class CreateDocumentTypeDto {
   expires?: boolean;
 }
 
-export class UpdateDocumentTypeDto extends PartialType(CreateDocumentTypeDto) {
-  @IsOptional()
-  @IsBoolean()
-  isActive?: boolean;
-}
+export class UpdateDocumentDto extends PartialType(CreateDocumentDto) {}

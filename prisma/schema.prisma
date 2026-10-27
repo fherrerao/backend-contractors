@@ -62,32 +62,83 @@ model Contractor {
   status      ContractorStatus @default(INCOMPLETE)
   isActive    Boolean          @default(true)
   users       User[]
-  documents   Document[]
+  projects    Project[]
+  workers     Worker[]
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
 
   @@index([status])
 }
 
-model DocumentType {
-  id          String     @id @default(uuid())
-  name        String     @unique
-  description String?
-  required    Boolean    @default(true)
-  expires     Boolean    @default(false)
-  isActive    Boolean    @default(true)
-  documents   Document[]
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+model Project {
+  id           String           @id @default(uuid())
+  name         String
+  description  String?
+  code         String?
+  status       ContractorStatus @default(INCOMPLETE)
+  isActive     Boolean          @default(true)
+  contractorId String
+  contractor   Contractor       @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  documents    Document[]
+  workers      ProjectWorker[]
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  @@index([contractorId])
+  @@index([status])
+}
+
+model Worker {
+  id           String          @id @default(uuid())
+  name         String
+  documentId   String
+  position     String
+  phone        String?
+  email        String?
+  isActive     Boolean         @default(true)
+  contractorId String
+  contractor   Contractor      @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  projects     ProjectWorker[]
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@unique([contractorId, documentId])
+  @@index([contractorId])
+}
+
+model ProjectWorker {
+  id        String                  @id @default(uuid())
+  projectId String
+  project   Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workerId  String
+  worker    Worker                  @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  assignedAt DateTime               @default(now())
+  documents ProjectWorkerDocument[]
+
+  @@unique([projectId, workerId])
+  @@index([workerId])
+}
+
+model ProjectWorkerDocument {
+  id              String        @id @default(uuid())
+  projectWorkerId String
+  projectWorker   ProjectWorker @relation(fields: [projectWorkerId], references: [id], onDelete: Cascade)
+  documentId      String
+  document        Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([projectWorkerId, documentId])
+  @@index([documentId])
 }
 
 model Document {
-  id           String           @id @default(uuid())
-  contractorId String
-  contractor   Contractor       @relation(fields: [contractorId], references: [id], onDelete: Cascade)
-  typeId       String
-  type         DocumentType     @relation(fields: [typeId], references: [id], onDelete: Cascade)
-  status       DocumentStatus   @default(PENDING)
+  id           String                   @id @default(uuid())
+  projectId    String
+  project      Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name         String
+  description  String?
+  required     Boolean                  @default(true)
+  expires      Boolean                  @default(false)
+  status       DocumentStatus           @default(PENDING)
   filePath     String?
   fileName     String?
   mimeType     String?
@@ -95,12 +146,13 @@ model Document {
   expiresAt    DateTime?
   submittedAt  DateTime?
   uploadedById String?
-  uploadedBy   User?            @relation("UploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  uploadedBy   User?                    @relation("UploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
   reviews      DocumentReview[]
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  workerLinks  ProjectWorkerDocument[]
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
 
-  @@unique([contractorId, typeId])
+  @@unique([projectId, name])
   @@index([status])
 }
 

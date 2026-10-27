@@ -9,8 +9,10 @@ export class DashboardController {
 
   @Get('stats')
   async stats(@CurrentUser() user: AuthUser) {
-    const contractorFilter =
-      user.role === 'CONTRACTOR_USER' ? { contractorId: user.contractorId ?? '' } : {};
+    const projectFilter =
+      user.role === 'CONTRACTOR_USER'
+        ? { project: { contractorId: user.contractorId ?? '' } }
+        : {};
     const in30Days = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     const [byStatus, docsByStatus, expiringSoon] = await Promise.all([
@@ -21,12 +23,12 @@ export class DashboardController {
       }),
       this.prisma.document.groupBy({
         by: ['status'],
-        where: { ...contractorFilter, type: { isActive: true } },
+        where: projectFilter,
         _count: true,
       }),
       this.prisma.document.findMany({
         where: {
-          ...contractorFilter,
+          ...projectFilter,
           status: 'APPROVED',
           expiresAt: { gte: new Date(), lte: in30Days },
         },
@@ -34,9 +36,15 @@ export class DashboardController {
         take: 10,
         select: {
           id: true,
+          name: true,
           expiresAt: true,
-          type: { select: { name: true } },
-          contractor: { select: { id: true, name: true } },
+          project: {
+            select: {
+              id: true,
+              name: true,
+              contractor: { select: { id: true, name: true } },
+            },
+          },
         },
       }),
     ]);
@@ -47,7 +55,13 @@ export class DashboardController {
     return {
       contractors: toRecord(byStatus),
       documents: toRecord(docsByStatus),
-      expiringSoon,
+      expiringSoon: expiringSoon.map((d) => ({
+        id: d.id,
+        expiresAt: d.expiresAt,
+        type: { name: d.name },
+        project: { id: d.project.id, name: d.project.name },
+        contractor: d.project.contractor,
+      })),
     };
   }
 }

@@ -13,20 +13,34 @@ export class ReviewsService {
   ) {}
 
   findPending() {
-    return this.prisma.document.findMany({
-      where: { status: 'SUBMITTED', type: { isActive: true } },
-      orderBy: { submittedAt: 'asc' },
-      include: {
-        type: true,
-        contractor: { select: { id: true, name: true, taxId: true } },
-        uploadedBy: { select: { id: true, name: true } },
-      },
-    });
+    return this.prisma.document
+      .findMany({
+        where: { status: 'SUBMITTED' },
+        orderBy: { submittedAt: 'asc' },
+        include: {
+          project: {
+            select: {
+              id: true,
+              name: true,
+              code: true,
+              contractor: { select: { id: true, name: true, taxId: true } },
+            },
+          },
+          uploadedBy: { select: { id: true, name: true } },
+        },
+      })
+      .then((docs) =>
+        docs.map(({ project, ...doc }) => ({
+          ...doc,
+          project: { id: project.id, name: project.name, code: project.code },
+          contractor: project.contractor,
+        })),
+      );
   }
 
   countPending() {
     return this.prisma.document
-      .count({ where: { status: 'SUBMITTED', type: { isActive: true } } })
+      .count({ where: { status: 'SUBMITTED' } })
       .then((count) => ({ count }));
   }
 
@@ -48,9 +62,8 @@ export class ReviewsService {
       const updated = await tx.document.update({
         where: { id: documentId },
         data: { status: dto.action },
-        include: { type: true },
       });
-      await this.compliance.recalculate(document.contractorId, tx);
+      await this.compliance.recalculateProject(document.projectId, tx);
       return updated;
     });
   }

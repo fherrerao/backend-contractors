@@ -33,22 +33,30 @@ export class ContractorsService {
       where,
       orderBy: { name: 'asc' },
       include: {
-        documents: {
-          where: { type: { isActive: true } },
-          select: { status: true },
+        projects: {
+          where: { isActive: true },
+          include: {
+            documents: {
+              select: { status: true },
+            },
+          },
         },
       },
     });
 
-    return contractors.map(({ documents, ...c }) => ({
-      ...c,
-      documentSummary: {
-        total: documents.length,
-        approved: documents.filter((d) => d.status === 'APPROVED').length,
-        submitted: documents.filter((d) => d.status === 'SUBMITTED').length,
-        rejected: documents.filter((d) => d.status === 'REJECTED').length,
-      },
-    }));
+    return contractors.map(({ projects, ...c }) => {
+      const documents = projects.flatMap((p) => p.documents);
+      return {
+        ...c,
+        projectCount: projects.length,
+        documentSummary: {
+          total: documents.length,
+          approved: documents.filter((d) => d.status === 'APPROVED').length,
+          submitted: documents.filter((d) => d.status === 'SUBMITTED').length,
+          rejected: documents.filter((d) => d.status === 'REJECTED').length,
+        },
+      };
+    });
   }
 
   async findOne(user: AuthUser, id: string) {
@@ -69,8 +77,7 @@ export class ContractorsService {
   async create(dto: CreateContractorDto) {
     await this.assertUniqueTaxId(dto.taxId);
     const contractor = await this.prisma.contractor.create({ data: dto });
-    await this.compliance.ensureDocuments(contractor.id);
-    await this.compliance.recalculate(contractor.id);
+    await this.compliance.recalculateContractor(contractor.id);
     return this.prisma.contractor.findUniqueOrThrow({ where: { id: contractor.id } });
   }
 

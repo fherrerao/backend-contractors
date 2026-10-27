@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   PayloadTooLargeException,
@@ -10,6 +11,7 @@ import { assertContractorAccess } from '../auth/scope.js';
 import { ComplianceService } from '../compliance/compliance.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StorageService } from '../storage/storage.service.js';
+import { CreateDocumentDto, UpdateDocumentDto } from './dto/document.dto.js';
 import { UploadDocumentDto } from './dto/upload-document.dto.js';
 
 export const ALLOWED_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png'];
@@ -43,31 +45,81 @@ export class DocumentsService {
     this.maxBytes = Number(config.get('MAX_UPLOAD_MB', 10)) * 1024 * 1024;
   }
 
-  async findByContractor(user: AuthUser, contractorId: string) {
-    assertContractorAccess(user, contractorId);
-    const contractor = await this.prisma.contractor.findUnique({ where: { id: contractorId } });
-    if (!contractor) throw new NotFoundException('Contratista no encontrado');
+  async findByProject(user: AuthUser, projectId: string) {
+    const project = await this.prisma.project.findUnique({ where: { id: projectId } });
+    if (!project) throw new NotFoundException('Proyecto no encontrado');
+    assertContractorAccess(user, project.contractorId);
 
-    await this.compliance.ensureDocuments(contractorId);
     return this.prisma.document.findMany({
-      where: { contractorId, type: { isActive: true } },
-      orderBy: [{ type: { required: 'desc' } }, { type: { name: 'asc' } }],
+      where: { projectId },
+      orderBy: [{ required: 'desc' }, { name: 'asc' }],
       include: {
-        type: true,
         uploadedBy: { select: { id: true, name: true } },
         reviews: { orderBy: { createdAt: 'desc' }, take: 1, select: reviewSelect },
       },
     });
   }
 
+  async create(user: AuthUser, projectId: string, dto: CreateDocumentDto) {
+    const project = await this.prisma.project.findUnique({ where: { id: projectId } });
+    if (!project) throw new NotFoundException('Proyecto no encontrado');
+    assertContractorAccess(user, project.contractorId);
+    await this.assertUniqueName(projectId, dto.name);
+
+    const document = await this.prisma.document.create({
+      data: {
+        projectId,
+        name: dto.name,
+        description: dto.description,
+        required: dto.required ?? true,
+        expires: dto.expires ?? false,
+      },
+    });
+
+    const links = await this.prisma.projectWorker.findMany({
+      where: { projectId },
+      select: { id: true },
+    });
+    if (links.length) {
+      await this.prisma.projectWorkerDocument.createMany({
+        data: links.map((link) => ({
+          projectWorkerId: link.id,
+          documentId: document.id,
+        })),
+        skipDuplicates: true,
+      });
+    }
+
+    await this.compliance.recalculateProject(projectId);
+    return document;
+  }
+
+  async update(user: AuthUser, id: string, dto: UpdateDocumentDto) {
+    const current = await this.findAccessible(user, id);
+    if (dto.name && dto.name !== current.name) {
+      await this.assertUniqueName(current.projectId, dto.name);
+    }
+    const document = await this.prisma.document.update({
+      where: { id },
+      data: dto,
+    });
+    if (dto.required !== undefined && dto.required !== current.required) {
+      await this.compliance.recalculateProject(current.projectId);
+    }
+    return document;
+  }
+
   async upload(
     user: AuthUser,
-    contractorId: string,
-    typeId: string,
+    projectId: string,
+    documentId: string,
     file: UploadedFileData | undefined,
     dto: UploadDocumentDto,
   ) {
-    assertContractorAccess(user, contractorId);
+    const project = await this.prisma.project.findUnique({ where: { id: projectId } });
+    if (!project) throw new NotFoundException('Proyecto no encontrado');
+    assertContractorAccess(user, project.contractorId);
+
     if (!file) throw new BadRequestException('Debes adjuntar un archivo');
     if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
       throw new BadRequestException('Formato no permitido. Usa PDF, JPG o PNG');
@@ -78,15 +130,13 @@ export class DocumentsService {
       );
     }
 
-    const [contractor, type] = await Promise.all([
-      this.prisma.contractor.findUnique({ where: { id: contractorId } }),
-      this.prisma.documentType.findUnique({ where: { id: typeId } }),
-    ]);
-    if (!contractor) throw new NotFoundException('Contratista no encontrado');
-    if (!type || !type.isActive) throw new NotFoundException('Tipo de documento no encontrado');
+    const document = await this.prisma.document.findUnique({ where: { id: documentId } });
+    if (!document || document.projectId !== projectId) {
+      throw new NotFoundException('Documento no encontrado');
+    }
 
     let expiresAt: Date | null = null;
-    if (type.expires) {
+    if (document.expires) {
       if (!dto.expiresAt) {
         throw new BadRequestException('Este documento requiere fecha de vencimiento');
       }
@@ -97,31 +147,26 @@ export class DocumentsService {
     }
 
     const fileName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    const previous = await this.prisma.document.findUnique({
-      where: { contractorId_typeId: { contractorId, typeId } },
-    });
     const filePath = await this.storage.save(file.buffer, fileName);
+    const previousPath = document.filePath;
 
-    const data = {
-      status: 'SUBMITTED' as const,
-      filePath,
-      fileName,
-      mimeType: file.mimetype,
-      size: file.size,
-      expiresAt,
-      submittedAt: new Date(),
-      uploadedById: user.sub,
-    };
-    const document = await this.prisma.document.upsert({
-      where: { contractorId_typeId: { contractorId, typeId } },
-      create: { contractorId, typeId, ...data },
-      update: data,
-      include: { type: true },
+    const updated = await this.prisma.document.update({
+      where: { id: documentId },
+      data: {
+        status: 'SUBMITTED',
+        filePath,
+        fileName,
+        mimeType: file.mimetype,
+        size: file.size,
+        expiresAt,
+        submittedAt: new Date(),
+        uploadedById: user.sub,
+      },
     });
 
-    if (previous?.filePath) await this.storage.delete(previous.filePath);
-    await this.compliance.recalculate(contractorId);
-    return document;
+    if (previousPath) await this.storage.delete(previousPath);
+    await this.compliance.recalculateProject(projectId);
+    return updated;
   }
 
   async getFile(user: AuthUser, id: string) {
@@ -144,9 +189,19 @@ export class DocumentsService {
   }
 
   private async findAccessible(user: AuthUser, id: string) {
-    const document = await this.prisma.document.findUnique({ where: { id } });
+    const document = await this.prisma.document.findUnique({
+      where: { id },
+      include: { project: { select: { contractorId: true } } },
+    });
     if (!document) throw new NotFoundException('Documento no encontrado');
-    assertContractorAccess(user, document.contractorId);
+    assertContractorAccess(user, document.project.contractorId);
     return document;
+  }
+
+  private async assertUniqueName(projectId: string, name: string) {
+    const exists = await this.prisma.document.findUnique({
+      where: { projectId_name: { projectId, name } },
+    });
+    if (exists) throw new ConflictException('Ya existe un documento con ese nombre en el proyecto');
   }
 }
