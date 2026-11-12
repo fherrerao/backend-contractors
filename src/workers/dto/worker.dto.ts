@@ -1,14 +1,5 @@
 import { PartialType } from '@nestjs/mapped-types';
-import {
-  ArrayMinSize,
-  IsArray,
-  IsBoolean,
-  IsEmail,
-  IsOptional,
-  IsString,
-  IsUUID,
-  MinLength,
-} from 'class-validator';
+import { IsBoolean, IsEmail, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class CreateWorkerDto {
   @IsString()
@@ -30,21 +21,10 @@ export class CreateWorkerDto {
   @IsOptional()
   @IsEmail({}, { message: 'Email invalido' })
   email?: string;
-
-  @IsArray()
-  @ArrayMinSize(1, { message: 'Debes asignar al menos un proyecto' })
-  @IsUUID('all', { each: true })
-  projectIds: string[];
 }
 
 export class UpdateWorkerDto extends PartialType(CreateWorkerDto) {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
-
-  @IsOptional()
-  @IsArray()
-  @ArrayMinSize(1, { message: 'Debes asignar al menos un proyecto' })
-  @IsUUID('all', { each: true })
-  projectIds?: string[];
 }

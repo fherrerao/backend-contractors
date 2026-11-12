@@ -1,9 +1,30 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import type { AuthUser } from '../auth/auth.types.js';
 import { ComplianceService } from '../compliance/compliance.service.js';
+import { mapDocument } from '../documents/documents.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ReviewDocumentDto } from './dto/review.dto.js';
 import { assertReviewable } from './review.rules.js';
+
+const pendingInclude = {
+  requirement: {
+    select: {
+      id: true,
+      name: true,
+      isActive: true,
+      projectDocuments: { select: { description: true, required: true, expires: true } },
+    },
+  },
+  uploadedBy: { select: { id: true, name: true } },
+  worker: {
+    select: {
+      id: true,
+      name: true,
+      documentId: true,
+      contractor: { select: { id: true, name: true, taxId: true } },
+    },
+  },
+} as const;
 
 @Injectable()
 export class ReviewsService {
@@ -15,32 +36,16 @@ export class ReviewsService {
   findPending() {
     return this.prisma.document
       .findMany({
-        where: { status: 'SUBMITTED' },
+        where: { status: 'SUBMITTED', requirement: { isActive: true } },
         orderBy: { submittedAt: 'asc' },
-        include: {
-          project: {
-            select: {
-              id: true,
-              name: true,
-              code: true,
-              contractor: { select: { id: true, name: true, taxId: true } },
-            },
-          },
-          uploadedBy: { select: { id: true, name: true } },
-        },
+        include: pendingInclude,
       })
-      .then((docs) =>
-        docs.map(({ project, ...doc }) => ({
-          ...doc,
-          project: { id: project.id, name: project.name, code: project.code },
-          contractor: project.contractor,
-        })),
-      );
+      .then((docs) => docs.map((doc) => mapDocument(doc)));
   }
 
   countPending() {
     return this.prisma.document
-      .count({ where: { status: 'SUBMITTED' } })
+      .count({ where: { status: 'SUBMITTED', requirement: { isActive: true } } })
       .then((count) => ({ count }));
   }
 
@@ -59,12 +64,16 @@ export class ReviewsService {
           fileName: document.fileName,
         },
       });
-      const updated = await tx.document.update({
+      await tx.document.update({
         where: { id: documentId },
         data: { status: dto.action },
       });
-      await this.compliance.recalculateProject(document.projectId, tx);
-      return updated;
+      await this.compliance.recalculateWorker(document.workerId, tx);
+      const updated = await tx.document.findUniqueOrThrow({
+        where: { id: documentId },
+        include: pendingInclude,
+      });
+      return mapDocument(updated);
     });
   }
 }

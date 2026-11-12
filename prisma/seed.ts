@@ -7,13 +7,12 @@ const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
 });
 
-const sampleDocuments = [
-  { name: 'RUT', description: 'Registro Unico Tributario', required: true, expires: false },
-  { name: 'Camara de comercio', description: 'Certificado de existencia y representacion legal (no mayor a 30 dias)', required: true, expires: true },
-  { name: 'Poliza de responsabilidad civil', description: 'Poliza vigente de responsabilidad civil extracontractual', required: true, expires: true },
-  { name: 'Planilla de seguridad social', description: 'Pago de aportes a seguridad social del mes', required: true, expires: true },
-  { name: 'Certificado bancario', description: 'Certificacion de cuenta bancaria', required: true, expires: false },
-  { name: 'Certificado SG-SST', description: 'Sistema de gestion de seguridad y salud en el trabajo', required: false, expires: true },
+const sampleRequirements = [
+  { name: 'Cedula de ciudadania', description: 'Documento de identidad vigente', required: true, expires: false },
+  { name: 'Certificado medico ocupacional', description: 'Apto para el cargo', required: true, expires: true },
+  { name: 'ARL', description: 'Afiliacion a riesgos laborales', required: true, expires: true },
+  { name: 'Seguridad social', description: 'Pago de aportes del mes', required: true, expires: true },
+  { name: 'Certificado de alturas', description: 'Solo si el cargo lo requiere', required: false, expires: true },
 ];
 
 async function main() {
@@ -43,29 +42,46 @@ async function main() {
     },
   });
 
-  let project = await prisma.project.findFirst({
+  const existingProject = await prisma.project.findFirst({
     where: { contractorId: contractor.id, name: 'Proyecto general' },
   });
-  if (!project) {
-    project = await prisma.project.create({
+  const project =
+    existingProject ??
+    (await prisma.project.create({
       data: {
         name: 'Proyecto general',
         description: 'Proyecto de ejemplo',
         code: 'GEN-001',
         contractorId: contractor.id,
       },
+    }));
+
+  for (const item of sampleRequirements) {
+    const requirement = await prisma.requirement.upsert({
+      where: { contractorId_name: { contractorId: contractor.id, name: item.name } },
+      update: { isActive: true },
+      create: { name: item.name, contractorId: contractor.id, isActive: true },
+    });
+    await prisma.projectDocument.upsert({
+      where: { projectId_requirementId: { projectId: project.id, requirementId: requirement.id } },
+      update: {
+        description: item.description,
+        required: item.required,
+        expires: item.expires,
+      },
+      create: {
+        projectId: project.id,
+        requirementId: requirement.id,
+        description: item.description,
+        required: item.required,
+        expires: item.expires,
+      },
     });
   }
 
-  for (const doc of sampleDocuments) {
-    await prisma.document.upsert({
-      where: { projectId_name: { projectId: project.id, name: doc.name } },
-      update: {},
-      create: { ...doc, projectId: project.id },
-    });
-  }
-
-  const documents = await prisma.document.findMany({ where: { projectId: project.id } });
+  const requirements = await prisma.requirement.findMany({
+    where: { contractorId: contractor.id, isActive: true },
+  });
 
   const worker1 = await prisma.worker.upsert({
     where: { contractorId_documentId: { contractorId: contractor.id, documentId: '1234567890' } },
@@ -94,13 +110,11 @@ async function main() {
   });
 
   for (const worker of [worker1, worker2]) {
-    const link = await prisma.projectWorker.upsert({
-      where: { projectId_workerId: { projectId: project.id, workerId: worker.id } },
-      update: {},
-      create: { projectId: project.id, workerId: worker.id },
-    });
-    await prisma.projectWorkerDocument.createMany({
-      data: documents.map((d) => ({ projectWorkerId: link.id, documentId: d.id })),
+    await prisma.document.createMany({
+      data: requirements.map((requirement) => ({
+        workerId: worker.id,
+        requirementId: requirement.id,
+      })),
       skipDuplicates: true,
     });
   }

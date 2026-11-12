@@ -25,7 +25,7 @@ export class WorkersController {
   }
 
   @Post('contractors/:contractorId/workers')
-  @Roles('ADMIN', 'APPROVER')
+  @Roles('ADMIN', 'APPROVER', 'CONTRACTOR_USER')
   create(
     @CurrentUser() user: AuthUser,
     @Param('contractorId', ParseUUIDPipe) contractorId: string,
@@ -40,7 +40,7 @@ export class WorkersController {
   }
 
   @Patch('workers/:id')
-  @Roles('ADMIN', 'APPROVER')
+  @Roles('ADMIN', 'APPROVER', 'CONTRACTOR_USER')
   update(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,

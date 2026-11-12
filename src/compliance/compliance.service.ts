@@ -2,7 +2,16 @@ import { Injectable } from '@nestjs/common';
 import type { ContractorStatus } from '../generated/prisma/enums.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
-type Db = Pick<PrismaService, 'contractor' | 'project' | 'document'>;
+type Db = Pick<
+  PrismaService,
+  'contractor' | 'project' | 'document' | 'worker' | 'projectWorker' | 'projectDocument'
+>;
+
+export interface ProjectDocRule {
+  requirementId: string;
+  required: boolean;
+  expires: boolean;
+}
 
 interface DocState {
   id: string;
@@ -11,7 +20,7 @@ interface DocState {
   expiresAt: Date | null;
 }
 
-/** Status de un proyecto a partir de sus documentos requeridos. */
+/** Estado a partir de los documentos obligatorios (trabajador o, historicamente, proyecto). */
 export function computeProjectStatus(docs: DocState[], now = new Date()): ContractorStatus {
   const required = docs.filter((d) => d.required);
 
@@ -24,15 +33,45 @@ export function computeProjectStatus(docs: DocState[], now = new Date()): Contra
   return 'INCOMPLETE';
 }
 
-/** Alias histórico. */
+/** Alias historico. */
 export const computeContractorStatus = (docs: DocState[], now?: Date) =>
   computeProjectStatus(docs, now);
 
-/** Agrega status de proyectos activos al status del contratista. */
-export function aggregateContractorStatus(projectStatuses: ContractorStatus[]): ContractorStatus {
-  if (!projectStatuses.length) return 'INCOMPLETE';
-  if (projectStatuses.some((s) => s === 'EXPIRED')) return 'EXPIRED';
-  if (projectStatuses.every((s) => s === 'COMPLIANT')) return 'COMPLIANT';
+/** Un archivo vencido solo cuenta como vencido en los proyectos que piden vencimiento. */
+export function documentStateForRule(
+  doc: { id: string; status: string; expiresAt: Date | null } | undefined,
+  rule: ProjectDocRule,
+): DocState {
+  const status = doc?.status ?? 'PENDING';
+  return {
+    id: doc?.id ?? rule.requirementId,
+    required: rule.required,
+    status: !rule.expires && status === 'EXPIRED' ? 'APPROVED' : status,
+    expiresAt: rule.expires ? (doc?.expiresAt ?? null) : null,
+  };
+}
+
+export function statusForRules(
+  rules: ProjectDocRule[],
+  docs: Array<{ id: string; requirementId: string; status: string; expiresAt: Date | null }>,
+  now = new Date(),
+): ContractorStatus {
+  return computeProjectStatus(
+    rules.map((rule) =>
+      documentStateForRule(
+        docs.find((doc) => doc.requirementId === rule.requirementId),
+        rule,
+      ),
+    ),
+    now,
+  );
+}
+
+/** Agrega estados (trabajadores de un proyecto, o trabajadores de un contratista). */
+export function aggregateContractorStatus(statuses: ContractorStatus[]): ContractorStatus {
+  if (!statuses.length) return 'INCOMPLETE';
+  if (statuses.some((s) => s === 'EXPIRED')) return 'EXPIRED';
+  if (statuses.every((s) => s === 'COMPLIANT')) return 'COMPLIANT';
   return 'INCOMPLETE';
 }
 
@@ -40,52 +79,127 @@ export function aggregateContractorStatus(projectStatuses: ContractorStatus[]): 
 export class ComplianceService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async recalculateProject(projectId: string, db: Db = this.prisma) {
+  async recalculateWorker(workerId: string, db: Db = this.prisma) {
+    const worker = await db.worker.findUnique({
+      where: { id: workerId },
+      select: { id: true, contractorId: true },
+    });
+    if (!worker) return null;
+
+    const activeAssignments = await db.projectWorker.findMany({
+      where: { workerId, project: { isActive: true } },
+      select: {
+        project: {
+          select: {
+            projectDocuments: {
+              where: { requirement: { isActive: true } },
+              select: { requirementId: true, required: true, expires: true },
+            },
+          },
+        },
+      },
+    });
+    const rules = new Map<string, ProjectDocRule>();
+    for (const link of activeAssignments) {
+      for (const doc of link.project.projectDocuments) {
+        const current = rules.get(doc.requirementId);
+        rules.set(doc.requirementId, {
+          requirementId: doc.requirementId,
+          required: (current?.required ?? false) || doc.required,
+          expires: (current?.expires ?? false) || doc.expires,
+        });
+      }
+    }
+    const docs = rules.size
+      ? await db.document.findMany({
+          where: { workerId, requirementId: { in: [...rules.keys()] } },
+          select: { id: true, requirementId: true, status: true, expiresAt: true },
+        })
+      : [];
+    const status = statusForRules([...rules.values()], docs);
+    await db.worker.update({ where: { id: workerId }, data: { status } });
+
+    const assignments = await db.projectWorker.findMany({
+      where: { workerId },
+      select: { projectId: true },
+    });
+    for (const link of assignments) {
+      await this.recalculateProject(link.projectId, db, false);
+    }
+    await this.recalculateContractor(worker.contractorId, db);
+    return status;
+  }
+
+  async recalculateProject(projectId: string, db: Db = this.prisma, updateContractor = true) {
     const project = await db.project.findUnique({
       where: { id: projectId },
       select: { id: true, contractorId: true },
     });
     if (!project) return null;
 
-    const docs = await db.document.findMany({
-      where: { projectId },
-      select: { id: true, required: true, status: true, expiresAt: true },
+    const rules = await db.projectDocument.findMany({
+      where: { projectId, requirement: { isActive: true } },
+      select: { requirementId: true, required: true, expires: true },
     });
-    const status = computeProjectStatus(docs);
+    const links = await db.projectWorker.findMany({
+      where: { projectId },
+      select: {
+        worker: {
+          select: {
+            isActive: true,
+            documents: {
+              where: { requirementId: { in: rules.map((rule) => rule.requirementId) } },
+              select: { id: true, requirementId: true, status: true, expiresAt: true },
+            },
+          },
+        },
+      },
+    });
+    const status = aggregateContractorStatus(
+      links
+        .filter((link) => link.worker.isActive)
+        .map((link) => statusForRules(rules, link.worker.documents)),
+    );
     await db.project.update({ where: { id: projectId }, data: { status } });
-    await this.recalculateContractor(project.contractorId, db);
+    if (updateContractor) await this.recalculateContractor(project.contractorId, db);
     return status;
   }
 
   async recalculateContractor(contractorId: string, db: Db = this.prisma) {
-    const projects = await db.project.findMany({
+    const workers = await db.worker.findMany({
       where: { contractorId, isActive: true },
       select: { status: true },
     });
-    const status = aggregateContractorStatus(projects.map((p) => p.status));
+    const status = aggregateContractorStatus(workers.map((w) => w.status));
     await db.contractor.update({ where: { id: contractorId }, data: { status } });
     return status;
   }
 
-  async recalculate(projectOrContractorId: string, db: Db = this.prisma) {
-    const project = await db.project.findUnique({
-      where: { id: projectOrContractorId },
+  async recalculate(workerOrContractorId: string, db: Db = this.prisma) {
+    const worker = await db.worker.findUnique({
+      where: { id: workerOrContractorId },
       select: { id: true },
     });
-    if (project) return this.recalculateProject(projectOrContractorId, db);
-    return this.recalculateContractor(projectOrContractorId, db);
+    if (worker) return this.recalculateWorker(workerOrContractorId, db);
+    return this.recalculateContractor(workerOrContractorId, db);
   }
 
   async recalculateAll() {
-    const projects = await this.prisma.project.findMany({ select: { id: true } });
-    for (const p of projects) await this.recalculateProject(p.id);
+    const workers = await this.prisma.worker.findMany({ select: { id: true } });
+    for (const worker of workers) await this.recalculateWorker(worker.id);
+    const contractors = await this.prisma.contractor.findMany({ select: { id: true } });
+    for (const contractor of contractors) await this.recalculateContractor(contractor.id);
   }
 
   async expireDocuments() {
     const now = new Date();
     const expired = await this.prisma.document.findMany({
-      where: { status: 'APPROVED', expiresAt: { lt: now } },
-      select: { id: true, projectId: true },
+      where: {
+        status: 'APPROVED',
+        expiresAt: { lt: now },
+        requirement: { isActive: true, projectDocuments: { some: { expires: true } } },
+      },
+      select: { id: true, workerId: true },
     });
     if (!expired.length) return 0;
 
@@ -93,8 +207,8 @@ export class ComplianceService {
       where: { id: { in: expired.map((d) => d.id) } },
       data: { status: 'EXPIRED' },
     });
-    for (const id of new Set(expired.map((d) => d.projectId))) {
-      await this.recalculateProject(id);
+    for (const id of new Set(expired.map((d) => d.workerId))) {
+      await this.recalculateWorker(id);
     }
     return expired.length;
   }

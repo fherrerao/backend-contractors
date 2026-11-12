@@ -1,11 +1,7 @@
-import {
-  BadRequestException,
-  ConflictException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import type { AuthUser } from '../auth/auth.types.js';
 import { assertContractorAccess } from '../auth/scope.js';
+import { ComplianceService } from '../compliance/compliance.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateWorkerDto, UpdateWorkerDto } from './dto/worker.dto.js';
 
@@ -13,16 +9,16 @@ const workerInclude = {
   projects: {
     include: {
       project: { select: { id: true, name: true, code: true, isActive: true } },
-      documents: {
-        include: { document: { select: { id: true, name: true } } },
-      },
     },
   },
 } as const;
 
 @Injectable()
 export class WorkersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly compliance: ComplianceService,
+  ) {}
 
   async findByContractor(user: AuthUser, contractorId: string) {
     assertContractorAccess(user, contractorId);
@@ -32,7 +28,7 @@ export class WorkersService {
       orderBy: { name: 'asc' },
       include: workerInclude,
     });
-    return workers.map((w) => this.mapWorker(w));
+    return workers.map((worker) => this.mapWorker(worker));
   }
 
   async findOne(user: AuthUser, id: string) {
@@ -49,13 +45,13 @@ export class WorkersService {
     assertContractorAccess(user, contractorId);
     await this.assertContractorExists(contractorId);
     await this.assertUniqueDocumentId(contractorId, dto.documentId);
-    await this.validateProjectIds(contractorId, dto.projectIds);
 
-    const { projectIds, ...data } = dto;
     const created = await this.prisma.worker.create({
-      data: { ...data, contractorId },
+      data: { ...dto, contractorId },
     });
-    await this.syncAssignments(created.id, projectIds);
+    await this.ensureDocuments(created.id, contractorId);
+    await this.compliance.recalculateWorker(created.id);
+
     const worker = await this.prisma.worker.findUniqueOrThrow({
       where: { id: created.id },
       include: workerInclude,
@@ -70,15 +66,13 @@ export class WorkersService {
     if (dto.documentId && dto.documentId !== current.documentId) {
       await this.assertUniqueDocumentId(current.contractorId, dto.documentId);
     }
-    if (dto.projectIds) {
-      await this.validateProjectIds(current.contractorId, dto.projectIds);
-    }
 
-    const { projectIds, ...data } = dto;
-    await this.prisma.worker.update({ where: { id }, data });
-    if (projectIds) {
-      await this.syncAssignments(id, projectIds);
+    await this.prisma.worker.update({ where: { id }, data: dto });
+    if (dto.isActive === true && !current.isActive) {
+      await this.ensureDocuments(id, current.contractorId);
     }
+    await this.compliance.recalculateWorker(id);
+
     const worker = await this.prisma.worker.findUniqueOrThrow({
       where: { id },
       include: workerInclude,
@@ -86,62 +80,32 @@ export class WorkersService {
     return this.mapWorker(worker);
   }
 
+  private async ensureDocuments(workerId: string, contractorId: string) {
+    const requirements = await this.prisma.requirement.findMany({
+      where: { contractorId, isActive: true, projectDocuments: { some: {} } },
+      select: { id: true },
+    });
+    if (!requirements.length) return;
+    await this.prisma.document.createMany({
+      data: requirements.map((requirement) => ({
+        workerId,
+        requirementId: requirement.id,
+      })),
+      skipDuplicates: true,
+    });
+  }
+
   private mapWorker(worker: {
     projects: Array<{
       project: { id: string; name: string; code: string | null; isActive: boolean };
-      documents: Array<{ document: { id: string; name: string } }>;
     }>;
     [key: string]: unknown;
   }) {
     const { projects, ...rest } = worker;
     return {
       ...rest,
-      projects: projects.map((pw) => ({
-        ...pw.project,
-        documents: pw.documents.map((d) => d.document),
-      })),
+      projects: projects.map((link) => link.project),
     };
-  }
-
-  private async syncAssignments(workerId: string, projectIds: string[]) {
-    await this.prisma.projectWorker.deleteMany({ where: { workerId } });
-    const projects = await this.prisma.project.findMany({
-      where: { id: { in: projectIds } },
-      select: { id: true, documents: { select: { id: true } } },
-    });
-    const docsByProject = new Map(projects.map((p) => [p.id, p.documents]));
-
-    for (const projectId of projectIds) {
-      const docs = docsByProject.get(projectId) ?? [];
-      if (!docs.length) {
-        throw new BadRequestException(
-          'Uno o mas proyectos no tienen documentos para asignar',
-        );
-      }
-      await this.prisma.projectWorker.create({
-        data: {
-          projectId,
-          workerId,
-          documents: {
-            create: docs.map((d) => ({ documentId: d.id })),
-          },
-        },
-      });
-    }
-  }
-
-  private async validateProjectIds(contractorId: string, projectIds: string[]) {
-    if (new Set(projectIds).size !== projectIds.length) {
-      throw new BadRequestException('No puedes asignar el mismo proyecto mas de una vez');
-    }
-
-    const projects = await this.prisma.project.findMany({
-      where: { id: { in: projectIds }, contractorId },
-      select: { id: true },
-    });
-    if (projects.length !== projectIds.length) {
-      throw new BadRequestException('Uno o mas proyectos no pertenecen a este contratista');
-    }
   }
 
   private async assertContractorExists(contractorId: string) {
@@ -153,6 +117,8 @@ export class WorkersService {
     const exists = await this.prisma.worker.findUnique({
       where: { contractorId_documentId: { contractorId, documentId } },
     });
-    if (exists) throw new ConflictException('Ya existe un trabajador con esa cedula en este contratista');
+    if (exists) {
+      throw new ConflictException('Ya existe un trabajador con esa cedula en este contratista');
+    }
   }
 }

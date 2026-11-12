@@ -9,9 +9,9 @@ export class DashboardController {
 
   @Get('stats')
   async stats(@CurrentUser() user: AuthUser) {
-    const projectFilter =
+    const documentFilter =
       user.role === 'CONTRACTOR_USER'
-        ? { project: { contractorId: user.contractorId ?? '' } }
+        ? { worker: { contractorId: user.contractorId ?? '' } }
         : {};
     const in30Days = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
@@ -23,22 +23,23 @@ export class DashboardController {
       }),
       this.prisma.document.groupBy({
         by: ['status'],
-        where: projectFilter,
+        where: { ...documentFilter, requirement: { isActive: true } },
         _count: true,
       }),
       this.prisma.document.findMany({
         where: {
-          ...projectFilter,
+          ...documentFilter,
           status: 'APPROVED',
           expiresAt: { gte: new Date(), lte: in30Days },
+          requirement: { isActive: true, projectDocuments: { some: { expires: true } } },
         },
         orderBy: { expiresAt: 'asc' },
         take: 10,
         select: {
           id: true,
-          name: true,
           expiresAt: true,
-          project: {
+          requirement: { select: { name: true } },
+          worker: {
             select: {
               id: true,
               name: true,
@@ -55,12 +56,12 @@ export class DashboardController {
     return {
       contractors: toRecord(byStatus),
       documents: toRecord(docsByStatus),
-      expiringSoon: expiringSoon.map((d) => ({
-        id: d.id,
-        expiresAt: d.expiresAt,
-        type: { name: d.name },
-        project: { id: d.project.id, name: d.project.name },
-        contractor: d.project.contractor,
+      expiringSoon: expiringSoon.map((doc) => ({
+        id: doc.id,
+        expiresAt: doc.expiresAt,
+        type: { name: doc.requirement.name },
+        worker: { id: doc.worker.id, name: doc.worker.name },
+        contractor: doc.worker.contractor,
       })),
     };
   }

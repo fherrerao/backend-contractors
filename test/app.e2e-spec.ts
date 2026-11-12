@@ -168,4 +168,190 @@ describe('Flujo de documentacion (e2e)', () => {
       .expect(200);
     expect(detail.body.status).toBe('COMPLIANT');
   });
+
+  it(
+    'no asigna trabajador al proyecto sin documentos obligatorios cumplidos',
+    async () => {
+    const server = app.getHttpServer();
+    const adminToken = await login('admin@contractors.local');
+    const approverToken = await login('aprobador@contractors.local');
+    const tag = `assign-${Date.now()}`;
+
+    const contractor = await request(server)
+      .post('/api/contractors')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: `Assign E2E ${tag}`, taxId: `ASSIGN-${tag}` })
+      .expect(201);
+
+    const project = await request(server)
+      .post(`/api/contractors/${contractor.body.id}/projects`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        name: `Proyecto assign ${tag}`,
+        code: `PA-${tag}`,
+        documents: [{ name: 'ARL Assign', required: true, expires: false }],
+      })
+      .expect(201);
+
+    const worker = await request(server)
+      .post(`/api/contractors/${contractor.body.id}/workers`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        name: 'Trabajador Assign',
+        documentId: `CC-${tag}`,
+        position: 'Ayudante',
+      })
+      .expect(201);
+
+    await request(server)
+      .post(`/api/projects/${project.body.id}/workers/${worker.body.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({})
+      .expect(400);
+
+    const docs = await request(server)
+      .get(`/api/workers/${worker.body.id}/documents`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    const arl = docs.body.find((d: { name: string }) => d.name === 'ARL Assign');
+    expect(arl).toBeTruthy();
+
+    const uploaded = await request(server)
+      .post(`/api/workers/${worker.body.id}/documents/${arl.id}/file`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .attach('file', Buffer.from('%PDF-1.4 assign'), {
+        filename: 'arl.pdf',
+        contentType: 'application/pdf',
+      })
+      .expect(201);
+
+    await request(server)
+      .post(`/api/documents/${uploaded.body.id}/review`)
+      .set('Authorization', `Bearer ${approverToken}`)
+      .send({ action: 'APPROVED' })
+      .expect(201);
+
+    await request(server)
+      .post(`/api/projects/${project.body.id}/workers/${worker.body.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({})
+      .expect(201);
+
+    const detail = await request(server)
+      .get(`/api/projects/${project.body.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    expect(detail.body.eligibleWorkerIds).toContain(worker.body.id);
+    expect(detail.body.workers.some((w: { id: string }) => w.id === worker.body.id)).toBe(true);
+    },
+    60_000,
+  );
+
+  it(
+    'agrega y elimina documentos del trabajador respetando obligatorios en proyectos',
+    async () => {
+      const server = app.getHttpServer();
+      const adminToken = await login('admin@contractors.local');
+      const approverToken = await login('aprobador@contractors.local');
+      const tag = `wdoc-${Date.now()}`;
+
+      const contractor = await request(server)
+        .post('/api/contractors')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ name: `Doc worker E2E ${tag}`, taxId: `WDOC-${tag}` })
+        .expect(201);
+
+      const project = await request(server)
+        .post(`/api/contractors/${contractor.body.id}/projects`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          name: `Proyecto wdoc ${tag}`,
+          documents: [
+            { name: 'ARL WorkerDoc', required: true, expires: false },
+            { name: 'Cert Opcional Wdoc', required: false, expires: false },
+          ],
+        })
+        .expect(201);
+
+      const worker = await request(server)
+        .post(`/api/contractors/${contractor.body.id}/workers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          name: 'Trabajador Doc',
+          documentId: `WD-${tag}`,
+          position: 'Operario',
+        })
+        .expect(201);
+
+      const listBefore = await request(server)
+        .get(`/api/workers/${worker.body.id}/documents`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(200);
+      const optional = listBefore.body.find((d: { name: string }) => d.name === 'Cert Opcional Wdoc');
+      expect(optional).toBeTruthy();
+
+      await request(server)
+        .delete(`/api/workers/${worker.body.id}/documents/${optional.id}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(204);
+
+      const projectDetail = await request(server)
+        .get(`/api/projects/${project.body.id}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(200);
+      const optionalReq = projectDetail.body.documents.find(
+        (d: { name: string }) => d.name === 'Cert Opcional Wdoc',
+      );
+      expect(optionalReq).toBeTruthy();
+
+      const added = await request(server)
+        .post(`/api/workers/${worker.body.id}/documents`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ requirementId: optionalReq.requirementId })
+        .expect(201);
+      expect(added.body.name).toBe('Cert Opcional Wdoc');
+      expect(added.body.removable).toBe(true);
+
+      const list = await request(server)
+        .get(`/api/workers/${worker.body.id}/documents`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(200);
+      expect(list.body.some((d: { name: string }) => d.name === 'Cert Opcional Wdoc')).toBe(true);
+
+      await request(server)
+        .delete(`/api/workers/${worker.body.id}/documents/${added.body.id}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(204);
+
+      const arl = list.body.find((d: { name: string }) => d.name === 'ARL WorkerDoc');
+      expect(arl).toBeTruthy();
+
+      const uploaded = await request(server)
+        .post(`/api/workers/${worker.body.id}/documents/${arl.id}/file`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .attach('file', Buffer.from('%PDF-1.4 wdoc'), {
+          filename: 'arl.pdf',
+          contentType: 'application/pdf',
+        })
+        .expect(201);
+
+      await request(server)
+        .post(`/api/documents/${uploaded.body.id}/review`)
+        .set('Authorization', `Bearer ${approverToken}`)
+        .send({ action: 'APPROVED' })
+        .expect(201);
+
+      await request(server)
+        .post(`/api/projects/${project.body.id}/workers/${worker.body.id}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({})
+        .expect(201);
+
+      await request(server)
+        .delete(`/api/workers/${worker.body.id}/documents/${arl.id}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(400);
+    },
+    60_000,
+  );
 });

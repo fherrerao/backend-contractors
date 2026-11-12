@@ -61,10 +61,11 @@ model Contractor {
   contactName String?
   status      ContractorStatus @default(INCOMPLETE)
   isActive    Boolean          @default(true)
-  users       User[]
-  projects    Project[]
-  workers     Worker[]
-  createdAt   DateTime         @default(now())
+  users        User[]
+  projects     Project[]
+  workers      Worker[]
+  requirements Requirement[]
+  createdAt    DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
 
   @@index([status])
@@ -79,10 +80,10 @@ model Project {
   isActive     Boolean          @default(true)
   contractorId String
   contractor   Contractor       @relation(fields: [contractorId], references: [id], onDelete: Cascade)
-  documents    Document[]
-  workers      ProjectWorker[]
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  workers          ProjectWorker[]
+  projectDocuments ProjectDocument[]
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 
   @@index([contractorId])
   @@index([status])
@@ -95,15 +96,50 @@ model Worker {
   position     String
   phone        String?
   email        String?
-  isActive     Boolean         @default(true)
+  isActive     Boolean          @default(true)
+  status       ContractorStatus @default(INCOMPLETE)
   contractorId String
-  contractor   Contractor      @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  contractor   Contractor       @relation(fields: [contractorId], references: [id], onDelete: Cascade)
   projects     ProjectWorker[]
+  documents    Document[]
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
   @@unique([contractorId, documentId])
   @@index([contractorId])
+  @@index([status])
+}
+
+model Requirement {
+  id               String            @id @default(uuid())
+  name             String
+  isActive         Boolean           @default(true)
+  contractorId     String
+  contractor       Contractor        @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  documents        Document[]
+  projectDocuments ProjectDocument[]
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@unique([contractorId, name])
+  @@index([contractorId])
+}
+
+model ProjectDocument {
+  id            String      @id @default(uuid())
+  description   String?
+  required      Boolean     @default(true)
+  expires       Boolean     @default(false)
+  projectId     String
+  project       Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  requirementId String
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([projectId, requirementId])
+  @@index([projectId])
+  @@index([requirementId])
 }
 
 model ProjectWorker {
@@ -112,47 +148,34 @@ model ProjectWorker {
   project   Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
   workerId  String
   worker    Worker                  @relation(fields: [workerId], references: [id], onDelete: Cascade)
-  assignedAt DateTime               @default(now())
-  documents ProjectWorkerDocument[]
+  assignedAt DateTime @default(now())
 
   @@unique([projectId, workerId])
   @@index([workerId])
 }
 
-model ProjectWorkerDocument {
-  id              String        @id @default(uuid())
-  projectWorkerId String
-  projectWorker   ProjectWorker @relation(fields: [projectWorkerId], references: [id], onDelete: Cascade)
-  documentId      String
-  document        Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
-
-  @@unique([projectWorkerId, documentId])
-  @@index([documentId])
-}
-
 model Document {
-  id           String                   @id @default(uuid())
-  projectId    String
-  project      Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  name         String
-  description  String?
-  required     Boolean                  @default(true)
-  expires      Boolean                  @default(false)
-  status       DocumentStatus           @default(PENDING)
-  filePath     String?
-  fileName     String?
-  mimeType     String?
-  size         Int?
-  expiresAt    DateTime?
-  submittedAt  DateTime?
-  uploadedById String?
-  uploadedBy   User?                    @relation("UploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
-  reviews      DocumentReview[]
-  workerLinks  ProjectWorkerDocument[]
-  createdAt    DateTime                 @default(now())
-  updatedAt    DateTime                 @updatedAt
+  id            String         @id @default(uuid())
+  workerId      String
+  worker        Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  requirementId String
+  requirement   Requirement    @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  status        DocumentStatus @default(PENDING)
+  filePath      String?
+  fileName      String?
+  mimeType      String?
+  size          Int?
+  expiresAt     DateTime?
+  submittedAt   DateTime?
+  uploadedById  String?
+  uploadedBy    User?          @relation("UploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  reviews       DocumentReview[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
-  @@unique([projectId, name])
+  @@unique([workerId, requirementId])
+  @@index([workerId])
+  @@index([requirementId])
   @@index([status])
 }
 

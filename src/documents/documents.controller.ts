@@ -1,10 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
-  Patch,
   Post,
   StreamableFile,
   UploadedFile,
@@ -13,53 +15,54 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { AuthUser } from '../auth/auth.types.js';
 import { CurrentUser, Roles } from '../auth/decorators.js';
-import { CreateDocumentDto, UpdateDocumentDto } from './dto/document.dto.js';
 import { DocumentsService, type UploadedFileData } from './documents.service.js';
+import { AddWorkerDocumentDto } from './dto/add-worker-document.dto.js';
 import { UploadDocumentDto } from './dto/upload-document.dto.js';
 
 @Controller()
 export class DocumentsController {
   constructor(private readonly documents: DocumentsService) {}
 
-  @Get('projects/:projectId/documents')
-  findByProject(
+  @Get('workers/:workerId/documents')
+  findByWorker(
     @CurrentUser() user: AuthUser,
-    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('workerId', ParseUUIDPipe) workerId: string,
   ) {
-    return this.documents.findByProject(user, projectId);
+    return this.documents.findByWorker(user, workerId);
   }
 
-  @Post('projects/:projectId/documents')
-  @Roles('ADMIN', 'APPROVER')
-  create(
+  @Post('workers/:workerId/documents')
+  @Roles('CONTRACTOR_USER', 'ADMIN')
+  addToWorker(
     @CurrentUser() user: AuthUser,
-    @Param('projectId', ParseUUIDPipe) projectId: string,
-    @Body() dto: CreateDocumentDto,
+    @Param('workerId', ParseUUIDPipe) workerId: string,
+    @Body() dto: AddWorkerDocumentDto,
   ) {
-    return this.documents.create(user, projectId, dto);
+    return this.documents.addToWorker(user, workerId, dto);
   }
 
-  @Patch('documents/:id')
-  @Roles('ADMIN', 'APPROVER')
-  update(
+  @Delete('workers/:workerId/documents/:documentId')
+  @Roles('CONTRACTOR_USER', 'ADMIN')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  removeFromWorker(
     @CurrentUser() user: AuthUser,
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateDocumentDto,
+    @Param('workerId', ParseUUIDPipe) workerId: string,
+    @Param('documentId', ParseUUIDPipe) documentId: string,
   ) {
-    return this.documents.update(user, id, dto);
+    return this.documents.removeFromWorker(user, workerId, documentId);
   }
 
-  @Post('projects/:projectId/documents/:documentId/file')
+  @Post('workers/:workerId/documents/:documentId/file')
   @Roles('CONTRACTOR_USER', 'ADMIN')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 50 * 1024 * 1024 } }))
   upload(
     @CurrentUser() user: AuthUser,
-    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('workerId', ParseUUIDPipe) workerId: string,
     @Param('documentId', ParseUUIDPipe) documentId: string,
     @UploadedFile() file: UploadedFileData | undefined,
     @Body() dto: UploadDocumentDto,
   ) {
-    return this.documents.upload(user, projectId, documentId, file, dto);
+    return this.documents.upload(user, workerId, documentId, file, dto);
   }
 
   @Get('documents/:id/file')

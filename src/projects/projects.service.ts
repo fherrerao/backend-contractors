@@ -6,13 +6,13 @@ import {
 } from '@nestjs/common';
 import type { AuthUser } from '../auth/auth.types.js';
 import { assertContractorAccess } from '../auth/scope.js';
-import { ComplianceService } from '../compliance/compliance.service.js';
-import { PrismaService } from '../prisma/prisma.service.js';
 import {
-  CreateProjectDto,
-  ProjectDocumentInputDto,
-  UpdateProjectDto,
-} from './dto/project.dto.js';
+  ComplianceService,
+  type ProjectDocRule,
+  statusForRules,
+} from '../compliance/compliance.service.js';
+import { PrismaService } from '../prisma/prisma.service.js';
+import { CreateProjectDto, ProjectDocumentInput, UpdateProjectDto } from './dto/project.dto.js';
 
 const workerSelect = {
   id: true,
@@ -22,14 +22,6 @@ const workerSelect = {
   phone: true,
   email: true,
   isActive: true,
-} as const;
-
-const documentSelect = {
-  id: true,
-  name: true,
-  description: true,
-  required: true,
-  expires: true,
   status: true,
 } as const;
 
@@ -43,31 +35,43 @@ export class ProjectsService {
   async findByContractor(user: AuthUser, contractorId: string) {
     assertContractorAccess(user, contractorId);
     await this.assertContractorExists(contractorId);
-    return this.prisma.project
-      .findMany({
-        where: { contractorId },
-        orderBy: { name: 'asc' },
-        include: {
-          _count: { select: { workers: true, documents: true } },
-          documents: {
-            select: documentSelect,
-            orderBy: { name: 'asc' },
+    const projects = await this.prisma.project.findMany({
+      where: { contractorId },
+      orderBy: { name: 'asc' },
+      include: {
+        projectDocuments: {
+          where: { requirement: { isActive: true } },
+          include: { requirement: { select: { id: true, name: true } } },
+          orderBy: { requirement: { name: 'asc' } },
+        },
+        workers: {
+          select: {
+            worker: {
+              select: {
+                isActive: true,
+                documents: { select: { id: true, requirementId: true, status: true, expiresAt: true } },
+              },
+            },
           },
         },
-      })
-      .then((projects) =>
-        projects.map(({ documents, _count, ...p }) => ({
-          ...p,
-          workerCount: _count.workers,
-          documents,
-          documentSummary: {
-            total: documents.length,
-            approved: documents.filter((d) => d.status === 'APPROVED').length,
-            submitted: documents.filter((d) => d.status === 'SUBMITTED').length,
-            rejected: documents.filter((d) => d.status === 'REJECTED').length,
-          },
-        })),
-      );
+      },
+    });
+    return projects.map(({ workers, projectDocuments, ...project }) => {
+      const rules = projectDocuments.map((link) => ({
+        requirementId: link.requirementId,
+        required: link.required,
+        expires: link.expires,
+      }));
+      const active = workers.filter((link) => link.worker.isActive);
+      return {
+        ...project,
+        documents: projectDocuments.map((link) => this.mapProjectDocument(link)),
+        workerCount: workers.length,
+        compliantWorkerCount: active.filter(
+          (link) => statusForRules(rules, link.worker.documents) === 'COMPLIANT',
+        ).length,
+      };
+    });
   }
 
   async findOne(user: AuthUser, id: string) {
@@ -75,30 +79,53 @@ export class ProjectsService {
       where: { id },
       include: {
         contractor: { select: { id: true, name: true, taxId: true } },
-        documents: {
-          select: documentSelect,
-          orderBy: { name: 'asc' },
+        projectDocuments: {
+          where: { requirement: { isActive: true } },
+          include: { requirement: { select: { id: true, name: true } } },
+          orderBy: { requirement: { name: 'asc' } },
         },
         workers: {
-          include: {
-            worker: { select: workerSelect },
-            documents: {
-              include: { document: { select: { id: true, name: true } } },
-            },
-          },
+          include: { worker: { select: workerSelect } },
           orderBy: { assignedAt: 'desc' },
         },
       },
     });
     if (!project) throw new NotFoundException('Proyecto no encontrado');
     assertContractorAccess(user, project.contractorId);
-    const { workers, ...rest } = project;
+    const rules = project.projectDocuments.map((link) => ({
+      requirementId: link.requirementId,
+      required: link.required,
+      expires: link.expires,
+    }));
+    const reqIds = rules.map((rule) => rule.requirementId);
+    const assignedWorkerIds = project.workers.map((link) => link.worker.id);
+    const docsForProject =
+      assignedWorkerIds.length && reqIds.length
+        ? await this.prisma.document.findMany({
+            where: {
+              workerId: { in: assignedWorkerIds },
+              requirementId: { in: reqIds },
+            },
+            select: { workerId: true, id: true, requirementId: true, status: true, expiresAt: true },
+          })
+        : [];
+    const workerDocs = new Map<string, Array<{ id: string; requirementId: string; status: string; expiresAt: Date | null }>>();
+    for (const row of docsForProject) {
+      const { workerId, ...file } = row;
+      const list = workerDocs.get(workerId) ?? [];
+      list.push(file);
+      workerDocs.set(workerId, list);
+    }
+    const eligibleWorkerIds = await this.computeEligibleWorkerIds(project.contractorId, rules);
+    const { workers, projectDocuments, ...rest } = project;
     return {
       ...rest,
-      workers: workers.map((pw) => ({
-        ...pw.worker,
-        assignedAt: pw.assignedAt,
-        documents: pw.documents.map((d) => d.document),
+      documents: projectDocuments.map((link) => this.mapProjectDocument(link)),
+      eligibleWorkerIds,
+      workers: workers.map((link) => ({
+        ...link.worker,
+        status: statusForRules(rules, workerDocs.get(link.worker.id) ?? []),
+        assignedAt: link.assignedAt,
       })),
     };
   }
@@ -106,24 +133,20 @@ export class ProjectsService {
   async create(user: AuthUser, contractorId: string, dto: CreateProjectDto) {
     assertContractorAccess(user, contractorId);
     await this.assertContractorExists(contractorId);
-    this.assertUniqueDocumentNames(dto.documents);
-
-    const { documents, ...data } = dto;
-    const project = await this.prisma.project.create({
-      data: {
-        ...data,
-        contractorId,
-        documents: {
-          create: documents.map((d) => ({
-            name: d.name,
-            description: d.description,
-            required: d.required ?? true,
-            expires: d.expires ?? false,
-          })),
+    this.assertDocumentList(dto.documents);
+    const project = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.project.create({
+        data: {
+          name: dto.name,
+          description: dto.description,
+          code: dto.code,
+          contractorId,
         },
-      },
+      });
+      await this.syncDocuments(tx, contractorId, created.id, dto.documents);
+      return created;
     });
-    await this.compliance.recalculateProject(project.id);
+    await this.recalculateCompany(contractorId, project.id);
     return this.findOne(user, project.id);
   }
 
@@ -131,19 +154,14 @@ export class ProjectsService {
     const current = await this.prisma.project.findUnique({ where: { id } });
     if (!current) throw new NotFoundException('Proyecto no encontrado');
     assertContractorAccess(user, current.contractorId);
+    if (dto.documents) this.assertDocumentList(dto.documents);
 
     const { documents, ...data } = dto;
-    if (documents) this.assertUniqueDocumentNames(documents);
-
-    await this.prisma.project.update({ where: { id }, data });
-    if (documents) {
-      await this.syncDocuments(id, documents);
-    }
-    if (dto.isActive !== undefined && dto.isActive !== current.isActive) {
-      await this.compliance.recalculateContractor(current.contractorId);
-    } else if (documents) {
-      await this.compliance.recalculateProject(id);
-    }
+    await this.prisma.$transaction(async (tx) => {
+      await tx.project.update({ where: { id }, data });
+      if (documents) await this.syncDocuments(tx, current.contractorId, id, documents);
+    });
+    await this.recalculateCompany(current.contractorId, id);
     return this.findOne(user, id);
   }
 
@@ -157,6 +175,9 @@ export class ProjectsService {
     if (worker.contractorId !== project.contractorId) {
       throw new BadRequestException('El trabajador no pertenece al mismo contratista');
     }
+    if (!worker.isActive) {
+      throw new BadRequestException('El trabajador esta inactivo');
+    }
 
     const existing = await this.prisma.projectWorker.findUnique({
       where: { projectId_workerId: { projectId, workerId } },
@@ -165,23 +186,10 @@ export class ProjectsService {
       throw new ConflictException('El trabajador ya esta asignado a este proyecto');
     }
 
-    const projectDocs = await this.prisma.document.findMany({
-      where: { projectId },
-      select: { id: true },
-    });
-    if (!projectDocs.length) {
-      throw new BadRequestException('El proyecto no tiene documentos para asignar');
-    }
+    await this.assertWorkerEligibleForProject(projectId, workerId);
 
-    await this.prisma.projectWorker.create({
-      data: {
-        projectId,
-        workerId,
-        documents: {
-          create: projectDocs.map((d) => ({ documentId: d.id })),
-        },
-      },
-    });
+    await this.prisma.projectWorker.create({ data: { projectId, workerId } });
+    await this.compliance.recalculateProject(projectId);
     return this.findOne(user, projectId);
   }
 
@@ -196,86 +204,191 @@ export class ProjectsService {
     if (!link) throw new NotFoundException('El trabajador no esta asignado a este proyecto');
 
     await this.prisma.projectWorker.delete({ where: { id: link.id } });
+    await this.compliance.recalculateProject(projectId);
     return this.findOne(user, projectId);
   }
 
-  private async syncDocuments(projectId: string, documents: ProjectDocumentInputDto[]) {
-    const existing = await this.prisma.document.findMany({
+  private assertDocumentList(documents: ProjectDocumentInput[]) {
+    const names = documents.map((doc) => doc.name.trim().toLowerCase());
+    if (names.some((name) => name.length < 2)) {
+      throw new BadRequestException('Cada documento necesita un nombre');
+    }
+    if (new Set(names).size !== names.length) {
+      throw new BadRequestException('Hay documentos repetidos en el proyecto');
+    }
+  }
+
+  private async syncDocuments(
+    tx: Pick<PrismaService, 'requirement' | 'projectDocument' | 'document' | 'worker'>,
+    contractorId: string,
+    projectId: string,
+    documents: ProjectDocumentInput[],
+  ) {
+    const current = await tx.projectDocument.findMany({
       where: { projectId },
-      select: { id: true, filePath: true },
+      select: { id: true, requirementId: true },
     });
-    const existingById = new Map(existing.map((d) => [d.id, d]));
-    const keptIds = new Set<string>();
-    const createdIds: string[] = [];
+    const kept: string[] = [];
 
     for (const doc of documents) {
-      if (doc.id) {
-        if (!existingById.has(doc.id)) {
-          throw new BadRequestException('Uno o mas documentos no pertenecen a este proyecto');
-        }
-        keptIds.add(doc.id);
-        await this.prisma.document.update({
-          where: { id: doc.id },
-          data: {
-            name: doc.name,
-            description: doc.description,
-            required: doc.required ?? true,
-            expires: doc.expires ?? false,
-          },
+      const name = doc.name.trim();
+      let requirement = await tx.requirement.findUnique({
+        where: { contractorId_name: { contractorId, name } },
+      });
+      if (!requirement) {
+        requirement = await tx.requirement.create({
+          data: { contractorId, name, isActive: true },
         });
-      } else {
-        const created = await this.prisma.document.create({
-          data: {
-            projectId,
-            name: doc.name,
-            description: doc.description,
-            required: doc.required ?? true,
-            expires: doc.expires ?? false,
-          },
+      } else if (!requirement.isActive) {
+        requirement = await tx.requirement.update({
+          where: { id: requirement.id },
+          data: { isActive: true },
         });
-        createdIds.push(created.id);
-        keptIds.add(created.id);
       }
+      kept.push(requirement.id);
+      await tx.projectDocument.upsert({
+        where: { projectId_requirementId: { projectId, requirementId: requirement.id } },
+        create: {
+          projectId,
+          requirementId: requirement.id,
+          description: doc.description?.trim() || null,
+          required: doc.required ?? true,
+          expires: doc.expires ?? false,
+        },
+        update: {
+          description: doc.description?.trim() || null,
+          required: doc.required ?? true,
+          expires: doc.expires ?? false,
+        },
+      });
     }
 
-    for (const doc of existing) {
-      if (keptIds.has(doc.id)) continue;
-      if (!doc.filePath) {
-        await this.prisma.document.delete({ where: { id: doc.id } });
-      }
+    const removed = current.filter((link) => !kept.includes(link.requirementId));
+    if (removed.length) {
+      await tx.projectDocument.deleteMany({ where: { id: { in: removed.map((link) => link.id) } } });
     }
 
-    if (createdIds.length) {
-      await this.assignNewDocumentsToWorkers(projectId, createdIds);
+    const touched = [...new Set([...current.map((link) => link.requirementId), ...kept])];
+    if (touched.length) {
+      await tx.requirement.updateMany({
+        where: { id: { in: touched }, projectDocuments: { none: {} } },
+        data: { isActive: false },
+      });
     }
-  }
 
-  private async assignNewDocumentsToWorkers(projectId: string, documentIds: string[]) {
-    const links = await this.prisma.projectWorker.findMany({
-      where: { projectId },
+    const workers = await tx.worker.findMany({
+      where: { contractorId, isActive: true },
       select: { id: true },
     });
-    if (!links.length) return;
-    await this.prisma.projectWorkerDocument.createMany({
-      data: links.flatMap((link) =>
-        documentIds.map((documentId) => ({
-          projectWorkerId: link.id,
-          documentId,
-        })),
-      ),
-      skipDuplicates: true,
-    });
+    if (workers.length && kept.length) {
+      await tx.document.createMany({
+        data: workers.flatMap((worker) =>
+          kept.map((requirementId) => ({ workerId: worker.id, requirementId })),
+        ),
+        skipDuplicates: true,
+      });
+    }
   }
 
-  private assertUniqueDocumentNames(documents: ProjectDocumentInputDto[]) {
-    const names = documents.map((d) => d.name.trim().toLowerCase());
-    if (new Set(names).size !== names.length) {
-      throw new BadRequestException('Hay nombres de documento duplicados en el proyecto');
-    }
+  private async recalculateCompany(contractorId: string, projectId: string) {
+    const workers = await this.prisma.worker.findMany({
+      where: { contractorId, isActive: true },
+      select: { id: true },
+    });
+    for (const worker of workers) await this.compliance.recalculateWorker(worker.id);
+    await this.compliance.recalculateProject(projectId);
+  }
+
+  private mapProjectDocument(link: {
+    id: string;
+    description: string | null;
+    required: boolean;
+    expires: boolean;
+    requirementId: string;
+    requirement: { name: string };
+  }) {
+    return {
+      id: link.id,
+      requirementId: link.requirementId,
+      name: link.requirement.name,
+      description: link.description,
+      required: link.required,
+      expires: link.expires,
+    };
   }
 
   private async assertContractorExists(contractorId: string) {
     const contractor = await this.prisma.contractor.findUnique({ where: { id: contractorId } });
     if (!contractor) throw new NotFoundException('Contratista no encontrado');
+  }
+
+  private hasRequiredRules(rules: ProjectDocRule[]) {
+    return rules.some((rule) => rule.required);
+  }
+
+  private async getProjectRules(projectId: string): Promise<ProjectDocRule[]> {
+    const links = await this.prisma.projectDocument.findMany({
+      where: { projectId, requirement: { isActive: true } },
+      select: { requirementId: true, required: true, expires: true },
+    });
+    return links.map((link) => ({
+      requirementId: link.requirementId,
+      required: link.required,
+      expires: link.expires,
+    }));
+  }
+
+  private async assertWorkerEligibleForProject(projectId: string, workerId: string) {
+    const rules = await this.getProjectRules(projectId);
+    if (!this.hasRequiredRules(rules)) {
+      throw new BadRequestException(
+        'El proyecto debe tener al menos un documento obligatorio para asignar trabajadores',
+      );
+    }
+    const reqIds = rules.map((rule) => rule.requirementId);
+    const docs = await this.prisma.document.findMany({
+      where: { workerId, requirementId: { in: reqIds } },
+      select: { id: true, requirementId: true, status: true, expiresAt: true },
+    });
+    const status = statusForRules(rules, docs);
+    if (status !== 'COMPLIANT') {
+      throw new BadRequestException(
+        'El trabajador no cumple con los documentos obligatorios de este proyecto',
+      );
+    }
+  }
+
+  private async computeEligibleWorkerIds(
+    contractorId: string,
+    rules: ProjectDocRule[],
+  ): Promise<string[]> {
+    if (!this.hasRequiredRules(rules)) return [];
+
+    const activeWorkers = await this.prisma.worker.findMany({
+      where: { contractorId, isActive: true },
+      select: { id: true },
+    });
+    if (!activeWorkers.length) return [];
+
+    const workerIds = activeWorkers.map((worker) => worker.id);
+    const reqIds = rules.map((rule) => rule.requirementId);
+    const rows = await this.prisma.document.findMany({
+      where: { workerId: { in: workerIds }, requirementId: { in: reqIds } },
+      select: { workerId: true, id: true, requirementId: true, status: true, expiresAt: true },
+    });
+    const workerDocs = new Map<
+      string,
+      Array<{ id: string; requirementId: string; status: string; expiresAt: Date | null }>
+    >();
+    for (const row of rows) {
+      const { workerId, ...file } = row;
+      const list = workerDocs.get(workerId) ?? [];
+      list.push(file);
+      workerDocs.set(workerId, list);
+    }
+
+    return workerIds.filter(
+      (id) => statusForRules(rules, workerDocs.get(id) ?? []) === 'COMPLIANT',
+    );
   }
 }

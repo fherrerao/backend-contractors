@@ -42,7 +42,7 @@ export class ProjectsController {
   }
 
   @Patch('projects/:id')
-  @Roles('ADMIN', 'APPROVER')
+  @Roles('ADMIN', 'APPROVER', 'CONTRACTOR_USER')
   update(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
@@ -52,7 +52,7 @@ export class ProjectsController {
   }
 
   @Post('projects/:id/workers/:workerId')
-  @Roles('ADMIN', 'APPROVER')
+  @Roles('ADMIN', 'APPROVER', 'CONTRACTOR_USER')
   assignWorker(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
@@ -63,7 +63,7 @@ export class ProjectsController {
   }
 
   @Delete('projects/:id/workers/:workerId')
-  @Roles('ADMIN', 'APPROVER')
+  @Roles('ADMIN', 'APPROVER', 'CONTRACTOR_USER')
   unassignWorker(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,

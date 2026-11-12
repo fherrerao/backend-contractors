@@ -33,10 +33,12 @@ export class ContractorsService {
       where,
       orderBy: { name: 'asc' },
       include: {
-        projects: {
+        _count: { select: { projects: { where: { isActive: true } } } },
+        workers: {
           where: { isActive: true },
-          include: {
+          select: {
             documents: {
+              where: { requirement: { isActive: true } },
               select: { status: true },
             },
           },
@@ -44,11 +46,11 @@ export class ContractorsService {
       },
     });
 
-    return contractors.map(({ projects, ...c }) => {
-      const documents = projects.flatMap((p) => p.documents);
+    return contractors.map(({ workers, _count, ...c }) => {
+      const documents = workers.flatMap((worker) => worker.documents);
       return {
         ...c,
-        projectCount: projects.length,
+        projectCount: _count.projects,
         documentSummary: {
           total: documents.length,
           approved: documents.filter((d) => d.status === 'APPROVED').length,

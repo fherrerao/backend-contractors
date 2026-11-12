@@ -6,16 +6,11 @@ import {
   IsBoolean,
   IsOptional,
   IsString,
-  IsUUID,
   MinLength,
   ValidateNested,
 } from 'class-validator';
 
-export class ProjectDocumentInputDto {
-  @IsOptional()
-  @IsUUID()
-  id?: string;
-
+export class ProjectDocumentInput {
   @IsString()
   @MinLength(2)
   name: string;
@@ -47,21 +42,14 @@ export class CreateProjectDto {
   code?: string;
 
   @IsArray()
-  @ArrayMinSize(1, { message: 'Debes agregar al menos un documento' })
+  @ArrayMinSize(1)
   @ValidateNested({ each: true })
-  @Type(() => ProjectDocumentInputDto)
-  documents: ProjectDocumentInputDto[];
+  @Type(() => ProjectDocumentInput)
+  documents: ProjectDocumentInput[];
 }
 
 export class UpdateProjectDto extends PartialType(CreateProjectDto) {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
-
-  @IsOptional()
-  @IsArray()
-  @ArrayMinSize(1, { message: 'Debes agregar al menos un documento' })
-  @ValidateNested({ each: true })
-  @Type(() => ProjectDocumentInputDto)
-  documents?: ProjectDocumentInputDto[];
 }

@@ -15,7 +15,6 @@ test
 .vscode
 *.md
 docker-compose.yml
-Dockerfile*
 .nyc_output
 .temp
 .tmp

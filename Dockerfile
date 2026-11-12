@@ -14,7 +14,7 @@
   # prisma.config.ts exige DATABASE_URL; solo hace falta un valor dummy en generate
   ENV DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build?schema=public"
   
-  RUN npm ci
+  RUN npm install
   
   COPY nest-cli.json tsconfig.json tsconfig.build.json* ./
   COPY src ./src
@@ -38,9 +38,11 @@
   COPY prisma ./prisma
   COPY prisma.config.ts ./
   
-  # prisma (devDependency) hace falta para `migrate deploy`
-  RUN npm ci --omit=dev \
-    && npm install prisma@7.10.0 --no-save \
+  # Dummy URL for prisma generate during image build
+  ENV DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build?schema=public"
+  
+  RUN npm install --omit=dev --ignore-scripts \
+    && npx prisma generate \
     && chown -R app:app /app
   
   COPY --from=build --chown=app:app /app/dist ./dist

@@ -8,6 +8,7 @@ import { ContractorsModule } from './contractors/contractors.module.js';
 import { DocumentsModule } from './documents/documents.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { ProjectsModule } from './projects/projects.module.js';
+import { RequirementsModule } from './requirements/requirements.module.js';
 import { ReviewsModule } from './reviews/reviews.module.js';
 import { StorageModule } from './storage/storage.module.js';
 import { UsersModule } from './users/users.module.js';
@@ -24,6 +25,7 @@ import { WorkersModule } from './workers/workers.module.js';
     UsersModule,
     ContractorsModule,
     ProjectsModule,
+    RequirementsModule,
     WorkersModule,
     DocumentsModule,
     ReviewsModule,
